@@ -1,0 +1,25 @@
+# Visual Studio
+.vs/
+*.user
+*.suo
+
+# .NET / MSBuild build output
+**/bin/
+**/obj/
+
+# NuGet packages are restored from packages.config
+packages/
+
+# Runtime-generated configuration and reports
+**/Config/
+**/reports/
+
+# Local HALCON and camera files
+*.license
+*.lic
+*.pdb
+
+# Operating system files
+Thumbs.db
+Desktop.ini
+.DS_Store
