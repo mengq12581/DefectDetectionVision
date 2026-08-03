@@ -52,6 +52,7 @@ namespace VisionDemo2026
         private System.Windows.Forms.Label lblMinSolidity;
         private System.Windows.Forms.Label lblMaxSolidity;
         private System.Windows.Forms.Label lblCircularity;
+        private System.Windows.Forms.Label lblMaxAspectRatio;
         private System.Windows.Forms.ComboBox cmbThresholdMode;
         private System.Windows.Forms.CheckBox chkClahe;
         private System.Windows.Forms.NumericUpDown numBrightness;
@@ -67,6 +68,7 @@ namespace VisionDemo2026
         private System.Windows.Forms.NumericUpDown numMinSolidity;
         private System.Windows.Forms.NumericUpDown numMaxSolidity;
         private System.Windows.Forms.NumericUpDown numCircularity;
+        private System.Windows.Forms.NumericUpDown numMaxAspectRatio;
 
         /// <summary>
         /// 释放窗体设计器创建的托管组件。
@@ -149,6 +151,8 @@ namespace VisionDemo2026
             this.numMaxSolidity = new System.Windows.Forms.NumericUpDown();
             this.lblCircularity = new System.Windows.Forms.Label();
             this.numCircularity = new System.Windows.Forms.NumericUpDown();
+            this.lblMaxAspectRatio = new System.Windows.Forms.Label();
+            this.numMaxAspectRatio = new System.Windows.Forms.NumericUpDown();
             this.rootLayout.SuspendLayout();
             this.tabImage.SuspendLayout();
             this.tabPageAnalysis.SuspendLayout();
@@ -170,6 +174,7 @@ namespace VisionDemo2026
             ((System.ComponentModel.ISupportInitialize)(this.numMinSolidity)).BeginInit();
             ((System.ComponentModel.ISupportInitialize)(this.numMaxSolidity)).BeginInit();
             ((System.ComponentModel.ISupportInitialize)(this.numCircularity)).BeginInit();
+            ((System.ComponentModel.ISupportInitialize)(this.numMaxAspectRatio)).BeginInit();
             this.SuspendLayout();
             // 
             // rootLayout
@@ -189,7 +194,6 @@ namespace VisionDemo2026
             this.rootLayout.RowStyles.Add(new System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, 20F));
             this.rootLayout.Size = new System.Drawing.Size(1767, 1087);
             this.rootLayout.TabIndex = 0;
-            
             // 
             // tabImage
             // 
@@ -390,6 +394,7 @@ namespace VisionDemo2026
             this.btnSearchCamera.Size = new System.Drawing.Size(130, 28);
             this.btnSearchCamera.TabIndex = 4;
             this.btnSearchCamera.Text = "搜索相机";
+            this.btnSearchCamera.TipsFont = new System.Drawing.Font("宋体", 9F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(134)));
             this.btnSearchCamera.Click += new System.EventHandler(this.btnSearchCamera_Click);
             // 
             // btnCaptureSingle
@@ -402,6 +407,7 @@ namespace VisionDemo2026
             this.btnCaptureSingle.Size = new System.Drawing.Size(110, 30);
             this.btnCaptureSingle.TabIndex = 8;
             this.btnCaptureSingle.Text = "单次采集";
+            this.btnCaptureSingle.TipsFont = new System.Drawing.Font("宋体", 9F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(134)));
             this.btnCaptureSingle.Click += new System.EventHandler(this.btnCaptureSingle_Click);
             // 
             // btnStartGrab
@@ -414,6 +420,7 @@ namespace VisionDemo2026
             this.btnStartGrab.Size = new System.Drawing.Size(110, 30);
             this.btnStartGrab.TabIndex = 9;
             this.btnStartGrab.Text = "连续采集";
+            this.btnStartGrab.TipsFont = new System.Drawing.Font("宋体", 9F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(134)));
             this.btnStartGrab.Click += new System.EventHandler(this.btnStartGrab_Click);
             // 
             // btnStopGrab
@@ -427,6 +434,7 @@ namespace VisionDemo2026
             this.btnStopGrab.Size = new System.Drawing.Size(118, 30);
             this.btnStopGrab.TabIndex = 10;
             this.btnStopGrab.Text = "停止采集";
+            this.btnStopGrab.TipsFont = new System.Drawing.Font("宋体", 9F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(134)));
             this.btnStopGrab.Click += new System.EventHandler(this.btnStopGrab_Click);
             // 
             // btnSetExposure
@@ -439,6 +447,7 @@ namespace VisionDemo2026
             this.btnSetExposure.Size = new System.Drawing.Size(144, 28);
             this.btnSetExposure.TabIndex = 7;
             this.btnSetExposure.Text = "设置曝光";
+            this.btnSetExposure.TipsFont = new System.Drawing.Font("宋体", 9F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(134)));
             this.btnSetExposure.Click += new System.EventHandler(this.btnSetExposure_Click);
             // 
             // controlPanel
@@ -487,6 +496,8 @@ namespace VisionDemo2026
             this.controlPanel.Controls.Add(this.numMaxSolidity);
             this.controlPanel.Controls.Add(this.lblCircularity);
             this.controlPanel.Controls.Add(this.numCircularity);
+            this.controlPanel.Controls.Add(this.lblMaxAspectRatio);
+            this.controlPanel.Controls.Add(this.numMaxAspectRatio);
             this.controlPanel.Dock = System.Windows.Forms.DockStyle.Fill;
             this.controlPanel.Location = new System.Drawing.Point(0, 138);
             this.controlPanel.Margin = new System.Windows.Forms.Padding(0);
@@ -742,7 +753,7 @@ namespace VisionDemo2026
             // 
             this.numBlur.Location = new System.Drawing.Point(190, 421);
             this.numBlur.Maximum = new decimal(new int[] {
-            8,
+            5,
             0,
             0,
             0});
@@ -1050,6 +1061,38 @@ namespace VisionDemo2026
             0});
             this.numCircularity.ValueChanged += new System.EventHandler(this.parameter_ValueChanged);
             // 
+            // lblMaxAspectRatio
+            // 
+            this.lblMaxAspectRatio.Font = new System.Drawing.Font("Microsoft YaHei UI", 9F);
+            this.lblMaxAspectRatio.Location = new System.Drawing.Point(12, 867);
+            this.lblMaxAspectRatio.Name = "lblMaxAspectRatio";
+            this.lblMaxAspectRatio.Size = new System.Drawing.Size(170, 25);
+            this.lblMaxAspectRatio.TabIndex = 42;
+            this.lblMaxAspectRatio.Text = "最大长宽比 (%)";
+            // 
+            // numMaxAspectRatio
+            // 
+            this.numMaxAspectRatio.Location = new System.Drawing.Point(190, 867);
+            this.numMaxAspectRatio.Maximum = new decimal(new int[] {
+            300,
+            0,
+            0,
+            0});
+            this.numMaxAspectRatio.Minimum = new decimal(new int[] {
+            100,
+            0,
+            0,
+            0});
+            this.numMaxAspectRatio.Name = "numMaxAspectRatio";
+            this.numMaxAspectRatio.Size = new System.Drawing.Size(168, 35);
+            this.numMaxAspectRatio.TabIndex = 43;
+            this.numMaxAspectRatio.Value = new decimal(new int[] {
+            135,
+            0,
+            0,
+            0});
+            this.numMaxAspectRatio.ValueChanged += new System.EventHandler(this.parameter_ValueChanged);
+            // 
             // Form1
             // 
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.None;
@@ -1083,6 +1126,7 @@ namespace VisionDemo2026
             ((System.ComponentModel.ISupportInitialize)(this.numMinSolidity)).EndInit();
             ((System.ComponentModel.ISupportInitialize)(this.numMaxSolidity)).EndInit();
             ((System.ComponentModel.ISupportInitialize)(this.numCircularity)).EndInit();
+            ((System.ComponentModel.ISupportInitialize)(this.numMaxAspectRatio)).EndInit();
             this.ResumeLayout(false);
 
         }

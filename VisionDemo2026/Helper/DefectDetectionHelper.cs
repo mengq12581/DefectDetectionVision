@@ -4,6 +4,7 @@ using HalconDotNet;
 
 namespace VisionDemo2026
 {
+    //检测参数，全部赋默认值
     public class DetectionParameter
     {
         public int Brightness = 50;
@@ -20,7 +21,8 @@ namespace VisionDemo2026
         public int QualifiedMaxArea = 5500;
         public int MinSolidityGate = 80;
         public int MaxSolidityGate = 90;
-        public int CircularityGate = 45;
+        public int CircularityGate = 80;
+        public int MaxAspectRatioPercent = 135;
     }
 
     public class DetectionItem
@@ -37,6 +39,8 @@ namespace VisionDemo2026
         public double Solidity;
         public double Extent;
         public double AspectRatio;
+        public int HoleCount;
+        public string DefectReason;
         public bool IsDefect;
     }
 
@@ -92,11 +96,13 @@ namespace VisionDemo2026
 
             try
             {
+                //亮度、对比度调整
                 double alpha = Math.Max(0.2, parameter.Contrast / 50.0);
                 int beta = parameter.Brightness - 50;
                 adjustedImage = HalconImageProcessHelper.ScaleImage(sourceImage, alpha, beta);
                 grayImage = GetGrayImage(adjustedImage);
 
+                //局部对比度增强
                 if (parameter.UseClahe)
                 {
                     HObject localEqualized;
@@ -109,11 +115,13 @@ namespace VisionDemo2026
                     enhancedImage = grayImage.CopyImage();
                 }
 
+                // 高斯滤波
                 int blurSize = GetOddKernelSize(parameter.BlurLevel);
                 filteredImage = parameter.BlurLevel > 0
                     ? HalconImageProcessHelper.GaussImage(enhancedImage, blurSize)
                     : enhancedImage.CopyImage();
 
+                // 阈值分割
                 thresholdRegion = CreateThresholdRegion(filteredImage, parameter, out backgroundImage);
                 if (thresholdRegion == null)
                 {
@@ -242,7 +250,7 @@ namespace VisionDemo2026
         /// 提取候选区域的几何特征，并按合格范围生成零件判定结果。
         /// </summary>
         /// <param name="regions">已经过候选面积筛选的连通区域集合。</param>
-        /// <param name="parameter">面积、实心度和圆度合格判定参数。</param>
+        /// <param name="parameter">圆环几何特征的合格判定参数。</param>
         /// <param name="items">接收零件检测结果的列表。</param>
         private static void ReadDetectionItems(HObject regions, DetectionParameter parameter,
                                                List<DetectionItem> items)
@@ -261,8 +269,13 @@ namespace VisionDemo2026
                     HTuple area, row, column;
                     HTuple row1, column1, row2, column2;
                     HTuple circularity, convexity;
+                    HTuple orientedRow, orientedColumn, orientedPhi, halfLength1, halfLength2;
+                    HTuple connectionCount, holeCount;
                     HOperatorSet.AreaCenter(region, out area, out row, out column);
                     HOperatorSet.SmallestRectangle1(region, out row1, out column1, out row2, out column2);
+                    HOperatorSet.SmallestRectangle2(region, out orientedRow, out orientedColumn, out orientedPhi,
+                        out halfLength1, out halfLength2);
+                    HOperatorSet.ConnectAndHoles(region, out connectionCount, out holeCount);
                     HOperatorSet.Circularity(region, out circularity);
                     HOperatorSet.Convexity(region, out convexity);
                     HOperatorSet.GenContourRegionXld(region, out contour, "border");
@@ -271,6 +284,8 @@ namespace VisionDemo2026
 
                     double width = Math.Max(1, column2.D - column1.D + 1);
                     double height = Math.Max(1, row2.D - row1.D + 1);
+                    double longAxis = Math.Max(halfLength1.D, halfLength2.D);
+                    double shortAxis = Math.Max(1, Math.Min(halfLength1.D, halfLength2.D));
                     DetectionItem item = new DetectionItem();
                     item.Row1 = row1.D;
                     item.Column1 = column1.D;
@@ -283,15 +298,27 @@ namespace VisionDemo2026
                     item.Circularity = circularity.D;
                     item.Solidity = convexity.D;
                     item.Extent = area.D / (width * height);
-                    item.AspectRatio = width / height;
+                    // 使用旋转最小外接矩形，避免零件旋转时轴向长宽比失真。
+                    item.AspectRatio = longAxis / shortAxis;
+                    item.HoleCount = holeCount.I;
                     bool areaQualified = item.Area >= parameter.QualifiedMinArea &&
                                          item.Area <= parameter.QualifiedMaxArea;
                     bool solidityQualified = item.Solidity >= parameter.MinSolidityGate / 100.0 &&
-                                             item.Solidity <= parameter.MaxSolidityGate / 100.0;
+                                              item.Solidity <= parameter.MaxSolidityGate / 100.0;
                     bool circularityQualified = item.Circularity >= parameter.CircularityGate / 100.0;
+                    bool holeQualified = item.HoleCount == 1;
+                    bool aspectRatioQualified = item.AspectRatio <= parameter.MaxAspectRatioPercent / 100.0;
 
-                    // 面积、实心度或圆度任一指标不合格，该零件即判定为 NG。
-                    item.IsDefect = !areaQualified || !solidityQualified || !circularityQualified;
+                    List<string> defectReasons = new List<string>();
+                    if (!areaQualified) defectReasons.Add("面积超限");
+                    if (!solidityQualified) defectReasons.Add("实心度超限");
+                    if (!circularityQualified) defectReasons.Add("圆度不足");
+                    if (!holeQualified) defectReasons.Add("内孔异常");
+                    if (!aspectRatioQualified) defectReasons.Add("长宽比超限");
+
+                    // 对圆环件同时约束整体尺寸、形状、内孔完整性和旋转无关的长宽比。
+                    item.IsDefect = defectReasons.Count > 0;
+                    item.DefectReason = item.IsDefect ? string.Join("、", defectReasons) : "合格";
                     items.Add(item);
                 }
                 finally

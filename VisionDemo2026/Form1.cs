@@ -627,6 +627,8 @@ namespace VisionDemo2026
 
             DetectionParameter parameter;
             string parameterMessage;
+
+            //如果读取参数失败，则返回错误信息，并且直接return
             if (!TryReadParameter(out parameter, out parameterMessage))
             {
                 lblSummary.Text = "参数错误：" + parameterMessage;
@@ -639,7 +641,7 @@ namespace VisionDemo2026
             List<DetectionItem> newItems;
             string message;
 
-            // 成功后才替换旧结果，避免处理失败时界面丢失上一帧有效结果。
+            // 对检测结果进行检查，成功后才替换旧结果，避免处理失败时界面丢失上一帧有效结果。
             if (!DefectDetectionHelper.Detect(currentImage, parameter, roiRegion, out newAdjustedImage,
                 out newMaskImage, out newEdgeImage, out newItems, out message))
             {
@@ -659,6 +661,8 @@ namespace VisionDemo2026
         /// <summary>
         /// 从界面读取检测参数，并校验合格面积与实心度范围。
         /// </summary>
+        /// <param name="parameter"> 更新后的检测参数对象 </param>
+        /// <param name="message"> 如果参数配置的有异常，会附带异常信息 </param>
         /// <returns>参数全部有效时返回 true，否则返回 false。</returns>
         private bool TryReadParameter(out DetectionParameter parameter, out string message)
         {
@@ -679,6 +683,7 @@ namespace VisionDemo2026
             parameter.MinSolidityGate = (int)numMinSolidity.Value;
             parameter.MaxSolidityGate = (int)numMaxSolidity.Value;
             parameter.CircularityGate = (int)numCircularity.Value;
+            parameter.MaxAspectRatioPercent = (int)numMaxAspectRatio.Value;
 
             if (parameter.QualifiedMinArea > parameter.QualifiedMaxArea)
             {
@@ -689,6 +694,12 @@ namespace VisionDemo2026
             if (parameter.MinSolidityGate > parameter.MaxSolidityGate)
             {
                 message = "最小实心度不能大于最大实心度。";
+                return false;
+            }
+
+            if (parameter.MaxAspectRatioPercent < 100)
+            {
+                message = "最大长宽比不能小于 100%。";
                 return false;
             }
 
@@ -870,9 +881,10 @@ namespace VisionDemo2026
             builder.AppendLine("合格面积范围：" + numMinArea.Value + "~" + numMaxArea.Value);
             builder.AppendLine("合格实心度范围：" + numMinSolidity.Value + "%~" + numMaxSolidity.Value +
                 "%，圆度下限：" + numCircularity.Value + "%");
+            builder.AppendLine("最大长宽比：" + numMaxAspectRatio.Value + "%（圆环必须保留一个内孔）");
             builder.AppendLine();
             builder.AppendLine("【零件明细】");
-            builder.AppendLine("序号,判定结果,中心横坐标,中心纵坐标,面积,周长,圆度(%),实心度(%),填充率(%),长宽比");
+            builder.AppendLine("序号,判定结果,中心横坐标,中心纵坐标,面积,周长,圆度(%),实心度(%),填充率(%),内孔数,长宽比,判定原因");
             for (int i = 0; i < detectionItems.Count; i++)
             {
                 DetectionItem item = detectionItems[i];
@@ -881,7 +893,8 @@ namespace VisionDemo2026
                     item.Area.ToString("F2") + "," + item.Perimeter.ToString("F2") + "," +
                     (item.Circularity * 100).ToString("F2") + "," +
                     (item.Solidity * 100).ToString("F2") + "," +
-                    (item.Extent * 100).ToString("F2") + "," + item.AspectRatio.ToString("F4"));
+                    (item.Extent * 100).ToString("F2") + "," + item.HoleCount + "," +
+                    item.AspectRatio.ToString("F4") + "," + item.DefectReason);
             }
             return builder.ToString();
         }
