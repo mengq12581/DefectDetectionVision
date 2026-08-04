@@ -884,7 +884,7 @@ namespace VisionDemo2026
             builder.AppendLine("最大长宽比：" + numMaxAspectRatio.Value + "%（圆环必须保留一个内孔）");
             builder.AppendLine();
             builder.AppendLine("【零件明细】");
-            builder.AppendLine("序号,判定结果,中心横坐标,中心纵坐标,面积,周长,圆度(%),实心度(%),填充率(%),内孔数,长宽比,判定原因");
+            builder.AppendLine("序号,判定结果,中心横坐标,中心纵坐标,面积,周长,圆度(%),实心度(%),填充率(%),内孔数,长宽比,外圈缺口深度(px),内圈缺口深度(px),判定原因");
             for (int i = 0; i < detectionItems.Count; i++)
             {
                 DetectionItem item = detectionItems[i];
@@ -894,7 +894,9 @@ namespace VisionDemo2026
                     (item.Circularity * 100).ToString("F2") + "," +
                     (item.Solidity * 100).ToString("F2") + "," +
                     (item.Extent * 100).ToString("F2") + "," + item.HoleCount + "," +
-                    item.AspectRatio.ToString("F4") + "," + item.DefectReason);
+                    item.AspectRatio.ToString("F4") + "," +
+                    item.OuterNotchDepth.ToString("F2") + "," +
+                    item.InnerNotchDepth.ToString("F2") + "," + item.DefectReason);
             }
             return builder.ToString();
         }

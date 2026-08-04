@@ -40,6 +40,8 @@ namespace VisionDemo2026
         public double Extent;
         public double AspectRatio;
         public int HoleCount;
+        public double OuterNotchDepth;
+        public double InnerNotchDepth;
         public string DefectReason;
         public bool IsDefect;
     }
@@ -49,6 +51,11 @@ namespace VisionDemo2026
         // 候选区域只负责排除明显噪声和大面积背景，不受界面合格参数影响。
         private const int DetectionMinArea = 1000;
         private const int DetectionMaxArea = 8000;
+        // 局部缺口使用像素深度判定，不放到界面中，避免普通使用时参数过多。
+        private const double LocalNotchDepthLimit = 2.0;
+        private const int LocalNotchMinAngleRun = 3;
+        private const int LocalNotchMaxAngleRun = 30;
+        private const int LocalAngleBinCount = 180;
 
         #region 零件缺陷检测
         /// <summary>
@@ -156,7 +163,8 @@ namespace VisionDemo2026
                 connectedRegions = HalconRegionHelper.Connection(activeRegion);
                 selectedRegion = HalconRegionHelper.SelectShape(connectedRegions, "area", "and",
                     DetectionMinArea, DetectionMaxArea);
-                ReadDetectionItems(selectedRegion, parameter, items);
+                // 闭运算后的区域用于稳定定位零件；局部缺口从闭运算前的区域提取，避免缺口被填平。
+                ReadDetectionItems(selectedRegion, openedRegion, parameter, items);
                 message = "检测完成，共发现 " + items.Count + " 个零件。";
                 return true;
             }
@@ -252,7 +260,8 @@ namespace VisionDemo2026
         /// <param name="regions">已经过候选面积筛选的连通区域集合。</param>
         /// <param name="parameter">圆环几何特征的合格判定参数。</param>
         /// <param name="items">接收零件检测结果的列表。</param>
-        private static void ReadDetectionItems(HObject regions, DetectionParameter parameter,
+        private static void ReadDetectionItems(HObject regions, HObject detailRegion,
+                                               DetectionParameter parameter,
                                                List<DetectionItem> items)
         {
             if (regions == null) return;
@@ -309,12 +318,23 @@ namespace VisionDemo2026
                     bool holeQualified = item.HoleCount == 1;
                     bool aspectRatioQualified = item.AspectRatio <= parameter.MaxAspectRatioPercent / 100.0;
 
+                    // 仅对整体形状正常且内孔完整的圆环进行局部缺口检测，避免将椭圆等整体变形误判为缺口。
+                    if (holeQualified && circularityQualified && aspectRatioQualified)
+                    {
+                        GetLocalNotchDepths(region, detailRegion, item.Row, item.Column,
+                            out item.OuterNotchDepth, out item.InnerNotchDepth);
+                    }
+                    bool outerNotchDetected = item.OuterNotchDepth > 0;
+                    bool innerNotchDetected = item.InnerNotchDepth > 0;
+
                     List<string> defectReasons = new List<string>();
                     if (!areaQualified) defectReasons.Add("面积超限");
                     if (!solidityQualified) defectReasons.Add("实心度超限");
                     if (!circularityQualified) defectReasons.Add("圆度不足");
                     if (!holeQualified) defectReasons.Add("内孔异常");
                     if (!aspectRatioQualified) defectReasons.Add("长宽比超限");
+                    if (outerNotchDetected) defectReasons.Add("外圈缺口");
+                    if (innerNotchDetected) defectReasons.Add("内圈缺口");
 
                     // 对圆环件同时约束整体尺寸、形状、内孔完整性和旋转无关的长宽比。
                     item.IsDefect = defectReasons.Count > 0;
@@ -327,6 +347,127 @@ namespace VisionDemo2026
                     SafeDispose(ref region);
                 }
             }
+        }
+
+        /// <summary>
+        /// 分别检查外圈向内凹陷和内圈向外扩张的局部半径异常。
+        /// </summary>
+        private static void GetLocalNotchDepths(HObject candidateRegion, HObject detailRegion,
+                                                double centerRow, double centerColumn,
+                                                out double outerNotchDepth, out double innerNotchDepth)
+        {
+            outerNotchDepth = 0;
+            innerNotchDepth = 0;
+            if (candidateRegion == null || detailRegion == null) return;
+
+            HObject localRegion = null;
+            try
+            {
+                // 从当前候选零件中取出闭运算前的轮廓细节，不受其它零件和背景影响。
+                HOperatorSet.Intersection(candidateRegion, detailRegion, out localRegion);
+                HTuple rows, columns;
+                HOperatorSet.GetRegionPoints(localRegion, out rows, out columns);
+                outerNotchDepth = GetLocalRadialDeviation(rows, columns, centerRow, centerColumn, true);
+                innerNotchDepth = GetLocalRadialDeviation(rows, columns, centerRow, centerColumn, false);
+            }
+            catch (HOperatorException)
+            {
+                // 局部区域不存在完整内、外边界时，由已有的内孔和整体特征规则处理。
+                outerNotchDepth = 0;
+                innerNotchDepth = 0;
+            }
+            finally
+            {
+                SafeDispose(ref localRegion);
+            }
+        }
+
+        /// <summary>
+        /// 以轮廓半径中位数作为基准，筛选范围较小的明显局部偏差。
+        /// </summary>
+        private static double GetLocalRadialDeviation(HTuple rows, HTuple columns,
+                                                      double centerRow, double centerColumn,
+                                                      bool isOuterBoundary)
+        {
+            if (rows == null || columns == null || rows.Length < LocalNotchMinAngleRun) return 0;
+
+            double[] outerRadiiByAngle = new double[LocalAngleBinCount];
+            double[] innerRadiiByAngle = new double[LocalAngleBinCount];
+            for (int i = 0; i < LocalAngleBinCount; i++)
+            {
+                outerRadiiByAngle[i] = double.NaN;
+                innerRadiiByAngle[i] = double.PositiveInfinity;
+            }
+            for (int i = 0; i < rows.Length; i++)
+            {
+                double rowOffset = rows[i].D - centerRow;
+                double columnOffset = columns[i].D - centerColumn;
+                double radius = Math.Sqrt(rowOffset * rowOffset + columnOffset * columnOffset);
+                double angle = Math.Atan2(rowOffset, columnOffset);
+                if (angle < 0) angle += Math.PI * 2;
+                int bin = Math.Min(LocalAngleBinCount - 1,
+                    (int)(angle / (Math.PI * 2) * LocalAngleBinCount));
+                if (double.IsNaN(outerRadiiByAngle[bin]) || radius > outerRadiiByAngle[bin])
+                    outerRadiiByAngle[bin] = radius;
+                if (radius < innerRadiiByAngle[bin])
+                    innerRadiiByAngle[bin] = radius;
+            }
+
+            List<double> radii = new List<double>();
+            for (int i = 0; i < LocalAngleBinCount; i++)
+            {
+                double radius = isOuterBoundary ? outerRadiiByAngle[i] : innerRadiiByAngle[i];
+                if (!double.IsNaN(radius) && !double.IsInfinity(radius)) radii.Add(radius);
+            }
+            if (radii.Count < LocalNotchMinAngleRun) return 0;
+            radii.Sort();
+            int middleIndex = radii.Count / 2;
+            double medianRadius = radii.Count % 2 == 0
+                ? (radii[middleIndex - 1] + radii[middleIndex]) / 2.0
+                : radii[middleIndex];
+            double maximumDepth = 0;
+            bool[] abnormalBins = new bool[LocalAngleBinCount];
+            for (int i = 0; i < LocalAngleBinCount; i++)
+            {
+                double radius = isOuterBoundary ? outerRadiiByAngle[i] : innerRadiiByAngle[i];
+                if (double.IsNaN(radius) || double.IsInfinity(radius)) continue;
+                double depth = isOuterBoundary
+                    ? medianRadius - radius
+                    : radius - medianRadius;
+                if (depth >= LocalNotchDepthLimit)
+                {
+                    abnormalBins[i] = true;
+                    maximumDepth = Math.Max(maximumDepth, depth);
+                }
+            }
+
+            int longestAbnormalRun = GetLongestCircularRun(abnormalBins);
+            return longestAbnormalRun >= LocalNotchMinAngleRun &&
+                   longestAbnormalRun <= LocalNotchMaxAngleRun ? maximumDepth : 0;
+        }
+
+        /// <summary>
+        /// 计算环形角度数组中连续异常扇区的最大长度，首尾相邻扇区会合并计算。
+        /// </summary>
+        private static int GetLongestCircularRun(bool[] values)
+        {
+            if (values == null || values.Length == 0) return 0;
+
+            int longestRun = 0;
+            int currentRun = 0;
+            for (int i = 0; i < values.Length * 2; i++)
+            {
+                if (values[i % values.Length] && currentRun < values.Length)
+                {
+                    currentRun++;
+                    longestRun = Math.Max(longestRun, currentRun);
+                }
+                else
+                {
+                    currentRun = 0;
+                }
+            }
+            return longestRun;
         }
 
         /// <summary>
