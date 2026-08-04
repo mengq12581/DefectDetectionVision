@@ -121,6 +121,47 @@ function Draw-FracturedRing
     }
 }
 
+function Draw-NotchedRing
+{
+    param(
+        [System.Drawing.Graphics]$Graphics,
+        [System.Drawing.Brush]$PartBrush,
+        [System.Drawing.Brush]$BackgroundBrush,
+        [double]$CenterX,
+        [double]$CenterY,
+        [double]$OuterDiameter,
+        [double]$InnerDiameter,
+        [System.Random]$Random
+    )
+
+    Draw-Ring $Graphics $PartBrush $BackgroundBrush $CenterX $CenterY $OuterDiameter $InnerDiameter
+
+    # 缺口只作用于内圈或外圈，不与另一侧边界连通，圆环仍保留一个闭合内孔。
+    $angle = $Random.Next(0, 360)
+    $halfWidth = $Random.Next(6, 9)
+    $outerRadius = $OuterDiameter / 2.0
+    $innerRadius = $InnerDiameter / 2.0
+    if ($Random.Next(0, 2) -eq 0)
+    {
+        # 外圈缺口：局部外半径缩小约 5 px。
+        $startRadius = $outerRadius + 2
+        $endRadius = $outerRadius - 5
+    }
+    else
+    {
+        # 内圈缺口：局部内半径扩大约 5 px。
+        $startRadius = [Math]::Max(1, $innerRadius - 2)
+        $endRadius = $innerRadius + 5
+    }
+    $notchPoints = [System.Drawing.PointF[]]@(
+        (Get-PolarPoint $CenterX $CenterY $startRadius ($angle - $halfWidth)),
+        (Get-PolarPoint $CenterX $CenterY $startRadius ($angle + $halfWidth)),
+        (Get-PolarPoint $CenterX $CenterY $endRadius ($angle + $halfWidth)),
+        (Get-PolarPoint $CenterX $CenterY $endRadius ($angle - $halfWidth))
+    )
+    $Graphics.FillPolygon($BackgroundBrush, $notchPoints)
+}
+
 function Draw-DeformedRing
 {
     param(
@@ -195,12 +236,14 @@ for ($imageIndex = 1; $imageIndex -le $ImageCount; $imageIndex++)
         $partCount = $random.Next(15, 21)
         $fractureCount = $random.Next(3, 5)
         $deformedCount = $random.Next(3, 5)
-        $qualifiedCount = $partCount - $fractureCount - $deformedCount
+        $notchedCount = $random.Next(2, 4)
+        $qualifiedCount = $partCount - $fractureCount - $deformedCount - $notchedCount
 
         $categories = [System.Collections.Generic.List[string]]::new()
         for ($i = 0; $i -lt $qualifiedCount; $i++) { $categories.Add("合格圆环") }
         for ($i = 0; $i -lt $fractureCount; $i++) { $categories.Add("裂缝或断裂") }
         for ($i = 0; $i -lt $deformedCount; $i++) { $categories.Add("变形") }
+        for ($i = 0; $i -lt $notchedCount; $i++) { $categories.Add("内外圈非贯穿缺口") }
         $shuffledCategories = Get-ShuffledItems $categories.ToArray() $random
 
         # 从 6×4 个安全工位中随机选取，加入有限扰动后仍可保证不裁切、不叠放。
@@ -237,6 +280,11 @@ for ($imageIndex = 1; $imageIndex -le $ImageCount; $imageIndex++)
                 elseif ($category -eq "裂缝或断裂")
                 {
                     Draw-FracturedRing $graphics $partBrush $backgroundBrush $centerX $centerY `
+                        $outerDiameter $innerDiameter $random
+                }
+                elseif ($category -eq "内外圈非贯穿缺口")
+                {
+                    Draw-NotchedRing $graphics $partBrush $backgroundBrush $centerX $centerY `
                         $outerDiameter $innerDiameter $random
                 }
                 else
