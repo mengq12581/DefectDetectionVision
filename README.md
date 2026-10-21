@@ -1,5 +1,7 @@
 # VisionDemo2026
 
+**简体中文** | [English](README.en.md)
+
 `VisionDemo2026` 是一个基于 **C# WinForms + HALCON** 开发的**圆环零件缺陷检测**上位机。项目使用传统机器视觉方法完成图像采集、预处理、区域分割、几何特征提取、OK/NG 判定、结果标注和报告导出。
 
 项目既可读取本地单张图片或图片文件夹，也可通过USB 摄像头或 GigE 工业相机采集图像，适合用于 HALCON 二次开发、WinForms 视觉软件和缺陷检测流程学习。
@@ -220,7 +222,8 @@ reports\                     # 导出的检测结果
 ```text
 VisionDemo2026/
 ├─ VisionDemo2026.sln
-├─ README.md
+├─ README.md                         # 中文说明
+├─ README.en.md                      # 英文说明
 ├─ Tools/
 │  └─ Generate-SampleImages.ps1
 └─ VisionDemo2026/
