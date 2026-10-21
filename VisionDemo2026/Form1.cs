@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
+using System.Threading;
 using System.Windows.Forms;
 using HalconDotNet;
 using Sunny.UI;
@@ -19,6 +20,13 @@ namespace VisionDemo2026
         private readonly SimpleJsonHelper jsonHelper = new SimpleJsonHelper();
         private HTuple cameraHandle;
         private bool isContinuousGrabbing;
+        private int continuousSessionId;
+        private DetectionParameter continuousDetectionParameter;
+        private HObject continuousRoiRegion;
+        private bool formClosing;
+        private readonly object previewSyncRoot = new object();
+        private HImage pendingPreviewImage;
+        private bool previewUpdatePosted;
         private bool isLoadingCameraConfig = true;
 
         private const string ConfigFolderName = "Config";
@@ -119,11 +127,28 @@ namespace VisionDemo2026
             UpdateNavigationState();
             lblSummary.Text = "连续采集中，停止采集后检测最后一帧。";
 
+            DetectionParameter detectionParameter;
+            string parameterMessage;
+            if (!TryReadParameter(out detectionParameter, out parameterMessage))
+            {
+                lblSummary.Text = "参数错误：" + parameterMessage;
+                return;
+            }
+
+            HalconImageHelper.SafeDispose(ref continuousRoiRegion);
+            continuousRoiRegion = roiRegion == null ? null : roiRegion.CopyObj(1, -1);
+            continuousDetectionParameter = detectionParameter;
+            int sessionId = Interlocked.Increment(ref continuousSessionId);
+
             string message;
             if (!HalconCameraHelper.StartContinuousGrab(CameraInterfaceName, SelectedCameraDeviceName,
-                txtExposure.Text, hWindowAnalysis, CameraFrameReceived,
+                txtExposure.Text, hWindowAnalysis,
+                image => CameraFrameReceived(sessionId, image),
+                image => ContinuousDetectionWorker(sessionId, image),
+                (state, stateMessage) => CameraStateChanged(sessionId, state, stateMessage),
                 ref cameraHandle, out message))
             {
+                HalconImageHelper.SafeDispose(ref continuousRoiRegion);
                 MessageBox.Show(this, message, "采集失败",
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 UpdateCameraControlState();
@@ -149,6 +174,7 @@ namespace VisionDemo2026
         /// </summary>
         private void btnSetExposure_Click(object sender, EventArgs e)
         {
+            StopContinuousGrab(false);
             string message;
             if (!HalconCameraHelper.SetCameraExposureByName(CameraInterfaceName,
                 SelectedCameraDeviceName, txtExposure.Text, ref cameraHandle, out message))
@@ -364,16 +390,173 @@ namespace VisionDemo2026
         /// 接收连续采集的新图像，替换当前帧并刷新预览窗口。
         /// </summary>
         /// <param name="image">相机采集线程传回的 HALCON 图像。</param>
-        private void CameraFrameReceived(HImage image)
+        private void CameraFrameReceived(int sessionId, HImage image)
         {
-            // 停止后可能还有一帧已排入 UI 队列，此时直接忽略，避免覆盖检测结果。
-            if (!isContinuousGrabbing || image == null) return;
+            if (image == null) return;
+            HImage replacedImage = null;
+            bool postUpdate = false;
+            lock (previewSyncRoot)
+            {
+                if (!isContinuousGrabbing || formClosing || sessionId != continuousSessionId)
+                {
+                    image.Dispose();
+                    return;
+                }
 
-            HImage latestImage = image.CopyImage();
-            HalconImageHelper.SafeDispose(ref currentImage);
-            currentImage = latestImage;
-            HalconImageHelper.SetCameraImageMode(SelectedCameraName);
-            HalconImageHelper.DisplayImageFitWindow(hWindowAnalysis, currentImage);
+                replacedImage = pendingPreviewImage;
+                pendingPreviewImage = image;
+                if (!previewUpdatePosted)
+                {
+                    previewUpdatePosted = true;
+                    postUpdate = true;
+                }
+            }
+
+            if (replacedImage != null)
+                replacedImage.Dispose();
+            if (!postUpdate)
+                return;
+
+            try
+            {
+                BeginInvoke(new Action(() => DrainPreviewImage(sessionId)));
+            }
+            catch
+            {
+                ClearPendingPreview(sessionId);
+            }
+        }
+
+        private void DrainPreviewImage(int sessionId)
+        {
+            HImage image;
+            lock (previewSyncRoot)
+            {
+                image = pendingPreviewImage;
+                pendingPreviewImage = null;
+                previewUpdatePosted = false;
+            }
+
+            if (image == null)
+                return;
+
+            if (!isContinuousGrabbing || formClosing || sessionId != continuousSessionId)
+            {
+                image.Dispose();
+                return;
+            }
+
+            UseCameraImage(image);
+
+            bool postUpdate = false;
+            lock (previewSyncRoot)
+            {
+                if (pendingPreviewImage != null && !previewUpdatePosted &&
+                    isContinuousGrabbing && !formClosing && sessionId == continuousSessionId)
+                {
+                    previewUpdatePosted = true;
+                    postUpdate = true;
+                }
+            }
+
+            if (postUpdate)
+            {
+                try
+                {
+                    BeginInvoke(new Action(() => DrainPreviewImage(sessionId)));
+                }
+                catch
+                {
+                    ClearPendingPreview(sessionId);
+                }
+            }
+        }
+
+        private void ClearPendingPreview(int sessionId)
+        {
+            HImage image = null;
+            lock (previewSyncRoot)
+            {
+                if (sessionId == continuousSessionId || formClosing)
+                {
+                    image = pendingPreviewImage;
+                    pendingPreviewImage = null;
+                    previewUpdatePosted = false;
+                }
+            }
+            if (image != null)
+                image.Dispose();
+        }
+
+        private void ContinuousDetectionWorker(int sessionId, HImage image)
+        {
+            HImage newAdjustedImage = null;
+            HImage newMaskImage = null;
+            HImage newEdgeImage = null;
+            List<DetectionItem> newItems;
+            string message;
+            try
+            {
+                if (image == null || formClosing || sessionId != continuousSessionId)
+                    return;
+
+                if (!DefectDetectionHelper.Detect(image, continuousDetectionParameter,
+                    continuousRoiRegion, out newAdjustedImage, out newMaskImage,
+                    out newEdgeImage, out newItems, out message))
+                    return;
+
+                BeginInvoke(new Action(() =>
+                {
+                    if (!isContinuousGrabbing || formClosing || sessionId != continuousSessionId)
+                    {
+                        HalconImageHelper.SafeDispose(ref newAdjustedImage);
+                        HalconImageHelper.SafeDispose(ref newMaskImage);
+                        HalconImageHelper.SafeDispose(ref newEdgeImage);
+                        return;
+                    }
+                    DisposeResultImages();
+                    adjustedImage = newAdjustedImage;
+                    maskImage = newMaskImage;
+                    edgeImage = newEdgeImage;
+                    detectionItems = newItems;
+                    newAdjustedImage = null;
+                    newMaskImage = null;
+                    newEdgeImage = null;
+                    DisplayDetectionResult();
+                    UpdateSummary();
+                }));
+            }
+            catch
+            {
+                HalconImageHelper.SafeDispose(ref newAdjustedImage);
+                HalconImageHelper.SafeDispose(ref newMaskImage);
+                HalconImageHelper.SafeDispose(ref newEdgeImage);
+            }
+        }
+
+        private void CameraStateChanged(int sessionId, HalconCameraHelper.CameraState state, string message)
+        {
+            try
+            {
+                BeginInvoke(new Action(() =>
+                {
+                    if (formClosing || sessionId != continuousSessionId) return;
+                    if (state == HalconCameraHelper.CameraState.DeviceFailure ||
+                        state == HalconCameraHelper.CameraState.Reconnecting ||
+                        state == HalconCameraHelper.CameraState.Failed)
+                        lblSummary.Text = message;
+                    if (state == HalconCameraHelper.CameraState.Failed)
+                    {
+                        isContinuousGrabbing = false;
+                        Interlocked.Increment(ref continuousSessionId);
+                        UpdateCameraControlState();
+                        UpdateSourceText();
+                    }
+                }));
+            }
+            catch
+            {
+            }
         }
 
         /// <summary>
@@ -406,7 +589,11 @@ namespace VisionDemo2026
             if (!isContinuousGrabbing) return;
 
             isContinuousGrabbing = false;
-            HalconCameraHelper.StopGrab();
+            int stoppedSessionId = Interlocked.Increment(ref continuousSessionId);
+            HalconCameraHelper.StopGrab(ref cameraHandle);
+            ClearPendingPreview(stoppedSessionId);
+            HalconImageHelper.SafeDispose(ref continuousRoiRegion);
+            continuousDetectionParameter = null;
             UpdateCameraControlState();
             UpdateSourceText();
 
@@ -931,8 +1118,13 @@ namespace VisionDemo2026
         private void Form1_FormClosed(object sender, FormClosedEventArgs e)
         {
             // 统一释放 HALCON 图像和区域句柄，避免窗体重复打开后占用资源。
+            formClosing = true;
             isContinuousGrabbing = false;
-            HalconCameraHelper.StopGrab();
+            int stoppedSessionId = Interlocked.Increment(ref continuousSessionId);
+            HalconCameraHelper.StopGrab(ref cameraHandle);
+            ClearPendingPreview(stoppedSessionId);
+            HalconImageHelper.SafeDispose(ref continuousRoiRegion);
+            continuousDetectionParameter = null;
             try
             {
                 HalconCameraHelper.Close(ref cameraHandle);
@@ -944,9 +1136,21 @@ namespace VisionDemo2026
             ClearRoi();
             DisposeResultImages();
             HalconImageHelper.SafeDispose(ref currentImage);
+            DisposeWindowTagImage(hWindowAnalysis);
+            DisposeWindowTagImage(hWindowMask);
+            DisposeWindowTagImage(hWindowEdge);
             HalconImageHelper.ClearWindow(hWindowAnalysis);
             HalconImageHelper.ClearWindow(hWindowMask);
             HalconImageHelper.ClearWindow(hWindowEdge);
+        }
+
+        private static void DisposeWindowTagImage(HWindowControl window)
+        {
+            if (window == null) return;
+            HImage tagImage = window.Tag as HImage;
+            if (tagImage != null)
+                tagImage.Dispose();
+            window.Tag = null;
         }
         #endregion
 

@@ -10,12 +10,77 @@ namespace VisionDemo2026
 {
     public class HalconCameraHelper
     {
+        private static readonly object CameraSyncRoot = new object();
+        private static readonly object CameraHandleSyncRoot = new object();
         private static CancellationTokenSource GrabCts;
+        private static Task GrabTask;
+        private static Task DetectionTask;
+        private static LatestImageSlot LatestFrameSlot;
+        private static HTuple ActiveHandle;
+        private static Action<HImage> DetectionCallback;
+        private static Action<CameraState, string> StateCallback;
         private static string CurrentCameraName;
         private static string CurrentInterfaceName;
-        private static int PendingDisplayCount;
+        // 避免设备或驱动异常时 GrabImageAsync 无限阻塞，保证停止和重连有机会收敛。
+        private const int GrabTimeoutMilliseconds = 1000;
 
         private static SimpleJsonHelper _jsonHelper = new SimpleJsonHelper();
+
+        public enum CameraState
+        {
+            Stopped,
+            Opening,
+            Running,
+            DeviceFailure,
+            Reconnecting,
+            Failed,
+            UserStopped
+        }
+
+        public sealed class LatestImageSlot : IDisposable
+        {
+            private readonly object syncRoot = new object();
+            private HImage image;
+
+            public void Publish(HImage newImage)
+            {
+                if (newImage == null) return;
+
+                HImage oldImage;
+                lock (syncRoot)
+                {
+                    oldImage = image;
+                    image = newImage;
+                }
+                if (oldImage != null) oldImage.Dispose();
+            }
+
+            public HImage Take()
+            {
+                lock (syncRoot)
+                {
+                    HImage result = image;
+                    image = null;
+                    return result;
+                }
+            }
+
+            public void Clear()
+            {
+                HImage oldImage;
+                lock (syncRoot)
+                {
+                    oldImage = image;
+                    image = null;
+                }
+                if (oldImage != null) oldImage.Dispose();
+            }
+
+            public void Dispose()
+            {
+                Clear();
+            }
+        }
 
         public class CameraDeviceInfo
         {
@@ -94,7 +159,6 @@ namespace VisionDemo2026
         /// <param name="acqHandle">输出打开后的图像采集句柄。</param>
         public static void Open(string interfaceName, string deviceName, out HTuple acqHandle)
         {
-            HOperatorSet.CloseAllFramegrabbers();
             HOperatorSet.OpenFramegrabber(interfaceName,
                 0, 0, 0, 0, 0, 0,
                 "progressive",
@@ -135,7 +199,12 @@ namespace VisionDemo2026
                 if (!IsOpen(acqHandle) || CurrentCameraName != cameraName ||
                     CurrentInterfaceName != interfaceName)
                 {
-                    StopGrab();
+                    StopGrab(ref acqHandle);
+                    if (IsOpen(acqHandle))
+                    {
+                        try { HOperatorSet.CloseFramegrabber(acqHandle); } catch { }
+                        acqHandle = null;
+                    }
                     string deviceName = cameraName;
                     if (string.Equals(interfaceName, "GigEVision2", StringComparison.OrdinalIgnoreCase) &&
                         cameraName.IndexOf("|", StringComparison.Ordinal) < 0 &&
@@ -204,6 +273,7 @@ namespace VisionDemo2026
             string exposureText, ref HTuple acqHandle, out HImage cameraImage, out string message)
         {
             cameraImage = null;
+            StopGrab(ref acqHandle);
             if (!OpenCameraByName(interfaceName, cameraName, ref acqHandle, out message))
                 return false;
 
@@ -212,8 +282,6 @@ namespace VisionDemo2026
 
             try
             {
-                // 单次采集前先停止后台取流，避免同一句柄被两个线程同时访问。
-                StopGrab();
                 cameraImage = Grab(acqHandle);
                 return true;
             }
@@ -230,104 +298,28 @@ namespace VisionDemo2026
         }
         #endregion
 
-        #region 连续采集
-        /// <summary>
-        /// 打开相机，按需应用曝光，并开始连续采集。
-        /// </summary>
-        /// <param name="interfaceName">HALCON 相机接口名称。</param>
-        /// <param name="cameraName">HALCON 原始设备描述或兼容的相机名称。</param>
-        /// <param name="exposureText">界面输入的曝光值文本，为空时保持相机当前曝光。</param>
-        /// <param name="window">用于连续显示图像的 HALCON 窗口控件。</param>
-        /// <param name="acqHandle">相机句柄引用，必要时由方法重新打开并替换。</param>
-        /// <param name="message">输出连续采集启动失败时的中文提示。</param>
-        /// <returns>连续采集成功启动时返回 true。</returns>
-        public static bool StartContinuousGrab(string interfaceName, string cameraName, string exposureText, HWindowControl window, ref HTuple acqHandle, out string message)
-        {
-            return StartContinuousGrab(interfaceName, cameraName, exposureText,
-                window, null, ref acqHandle, out message);
-        }
-
-        /// <summary>
-        /// 打开相机并启动连续采集，可通过回调接收每一帧图像。
-        /// </summary>
-        /// <param name="interfaceName">HALCON 相机接口名称。</param>
-        /// <param name="cameraName">HALCON 原始设备描述或兼容的相机名称。</param>
-        /// <param name="exposureText">界面输入的曝光值文本，为空时保持相机当前曝光。</param>
-        /// <param name="window">用于调度 UI 更新和显示图像的 HALCON 窗口控件。</param>
-        /// <param name="imageReceived">接收采集帧的回调，为 null 时由 Helper 直接显示。</param>
-        /// <param name="acqHandle">相机句柄引用，必要时由方法重新打开并替换。</param>
-        /// <param name="message">输出连续采集启动失败时的中文提示。</param>
-        /// <returns>连续采集成功启动时返回 true。</returns>
-        public static bool StartContinuousGrab(string interfaceName, string cameraName,
-            string exposureText, HWindowControl window, Action<HImage> imageReceived,
-            ref HTuple acqHandle, out string message)
-        {
-            if (!OpenCameraByName(interfaceName, cameraName, ref acqHandle, out message))
-                return false;
-
-            if (!ApplyExposureText(acqHandle, exposureText, false, out message))
-                return false;
-
-            try
-            {
-                StartGrab(acqHandle, window, imageReceived);
-                return true;
-            }
-            catch (Exception ex)
-            {
-                message = "\u8fde\u7eed\u91c7\u96c6\u542f\u52a8\u5931\u8d25\uff1a" + ex.Message;
-                return false;
-            }
-        }
-        #endregion
-
-        /// <summary>
-        /// 使用相机句柄同步采集一帧图像。
-        /// </summary>
-        /// <param name="acqHandle">已经打开的 HALCON 图像采集句柄。</param>
-        /// <returns>采集到的新图像，由调用方负责释放。</returns>
         public static HImage Grab(HTuple acqHandle)
         {
             HObject image;
             HOperatorSet.GrabImage(out image, acqHandle);
             return new HImage(image);
         }
-        #endregion
 
-        #region 抓一帧（异步）
-        /// <summary>
-        /// 使用已启动的相机句柄异步获取一帧图像。
-        /// </summary>
-        /// <param name="acqHandle">已经启动取流的 HALCON 图像采集句柄。</param>
-        /// <returns>采集到的新图像，由调用方负责释放。</returns>
         public static HImage GrabAsync(HTuple acqHandle)
         {
             HObject image;
-            HOperatorSet.GrabImageAsync(out image, acqHandle, -1);
+            HOperatorSet.GrabImageAsync(out image, acqHandle, GrabTimeoutMilliseconds);
             return new HImage(image);
         }
-        #endregion
 
-        #region 判断相机是否打开
-        /// <summary>
-        /// 判断 HALCON 图像采集句柄是否包含有效值。
-        /// </summary>
-        /// <param name="acqHandle">需要检查的图像采集句柄。</param>
-        /// <returns>句柄非空且包含元素时返回 true。</returns>
         public static bool IsOpen(HTuple acqHandle)
         {
             return acqHandle != null && acqHandle.Length > 0;
         }
-        #endregion
 
-        #region 关闭相机
-        /// <summary>
-        /// 停止连续采集、关闭相机句柄并清空当前设备状态。
-        /// </summary>
-        /// <param name="acqHandle">需要关闭并置空的图像采集句柄。</param>
         public static void Close(ref HTuple acqHandle)
         {
-            StopGrab();
+            StopGrab(ref acqHandle);
             try
             {
                 if (IsOpen(acqHandle))
@@ -340,117 +332,388 @@ namespace VisionDemo2026
                 CurrentInterfaceName = null;
             }
         }
-        #endregion
 
-        #region 开启连续采集
-        /// <summary>
-        /// 启动连续采集，并由 Helper 将每帧直接显示到窗口。
-        /// </summary>
-        /// <param name="acqHandle">已经打开的 HALCON 图像采集句柄。</param>
-        /// <param name="window">用于显示采集图像的 HALCON 窗口控件。</param>
+        #region 连续采集
+        public static bool StartContinuousGrab(string interfaceName, string cameraName, string exposureText,
+            HWindowControl window, Action<HImage> imageReceived, ref HTuple acqHandle, out string message)
+        {
+            return StartContinuousGrab(interfaceName, cameraName, exposureText, window,
+                imageReceived, null, null, ref acqHandle, out message);
+        }
+
+        public static bool StartContinuousGrab(string interfaceName, string cameraName, string exposureText,
+            HWindowControl window, Action<HImage> imageReceived, Action<HImage> detectionReceived,
+            Action<CameraState, string> stateChanged, ref HTuple acqHandle, out string message)
+        {
+            message = string.Empty;
+            StopGrab(ref acqHandle);
+            NotifyState(stateChanged, CameraState.Opening, "正在打开相机");
+            if (!OpenCameraByName(interfaceName, cameraName, ref acqHandle, out message))
+                return false;
+            if (!ApplyExposureText(acqHandle, exposureText, false, out message))
+            {
+                Close(ref acqHandle);
+                return false;
+            }
+
+            try
+            {
+                HOperatorSet.GrabImageStart(acqHandle, -1);
+                lock (CameraSyncRoot)
+                {
+                    ActiveHandle = acqHandle;
+                    GrabCts = new CancellationTokenSource();
+                    CancellationToken token = GrabCts.Token;
+                    LatestFrameSlot = new LatestImageSlot();
+                    DetectionCallback = detectionReceived;
+                    StateCallback = stateChanged;
+                    GrabTask = Task.Run(() => AcquisitionLoop(interfaceName, cameraName, exposureText,
+                        imageReceived, token));
+                    DetectionTask = detectionReceived == null
+                        ? null
+                        : Task.Run(() => DetectionLoop(token));
+                }
+                NotifyState(CameraState.Running, "连续采集已启动");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                message = "连续采集启动失败：" + ex.Message;
+                StopGrab();
+                Close(ref acqHandle);
+                return false;
+            }
+        }
+
         public static void StartGrab(HTuple acqHandle, HWindowControl window)
         {
             StartGrab(acqHandle, window, null);
         }
 
-        /// <summary>
-        /// 启动连续采集后台任务，并按帧执行指定的 UI 回调。
-        /// </summary>
-        /// <param name="acqHandle">已经打开的 HALCON 图像采集句柄。</param>
-        /// <param name="window">用于 BeginInvoke 调度和图像显示的 HALCON 窗口控件。</param>
-        /// <param name="imageReceived">接收每帧图像的回调，为 null 时直接显示。</param>
-        public static void StartGrab(HTuple acqHandle, HWindowControl window,
-            Action<HImage> imageReceived)
+        public static void StartGrab(HTuple acqHandle, HWindowControl window, Action<HImage> imageReceived)
         {
-            StopGrab();
-            HOperatorSet.GrabImageStart(acqHandle, -1);
-
-            GrabCts = new CancellationTokenSource();
-            var token = GrabCts.Token;
-
-            Task.Run(() => GrabLoop(acqHandle, window, imageReceived, token));
+            string message;
+            StartContinuousGrab(CurrentInterfaceName, CurrentCameraName, string.Empty,
+                window, imageReceived, null, null, ref acqHandle, out message);
         }
-        #endregion
 
-        #region 停止连续采集
-        /// <summary>
-        /// 取消并释放当前连续采集任务的取消令牌。
-        /// </summary>
         public static void StopGrab()
         {
-            if (GrabCts != null)
+            CancellationTokenSource cts;
+            Task grabTask;
+            Task detectionTask;
+            LatestImageSlot slot;
+            Action<CameraState, string> stateChanged;
+            lock (CameraSyncRoot)
             {
-                GrabCts.Cancel();
-                GrabCts.Dispose();
+                cts = GrabCts;
+                grabTask = GrabTask;
+                detectionTask = DetectionTask;
+                slot = LatestFrameSlot;
+                stateChanged = StateCallback;
                 GrabCts = null;
+                GrabTask = null;
+                DetectionTask = null;
+                LatestFrameSlot = null;
+                DetectionCallback = null;
+                StateCallback = null;
+            }
+            if (cts == null) return;
+
+            cts.Cancel();
+            WaitTask(grabTask);
+            WaitTask(detectionTask);
+            if (slot != null) slot.Dispose();
+            cts.Dispose();
+            CloseActiveHandle();
+            NotifyState(stateChanged, CameraState.UserStopped, "用户已停止连续采集");
+        }
+
+        public static void StopGrab(ref HTuple acqHandle)
+        {
+            bool hadContinuousGrab;
+            lock (CameraSyncRoot)
+            {
+                hadContinuousGrab = GrabCts != null;
+            }
+            StopGrab();
+            // 连续会话的活动句柄已由 StopGrab() 在等待任务退出后关闭，避免重复关闭。
+            if (!hadContinuousGrab && IsOpen(acqHandle))
+            {
+                try { HOperatorSet.CloseFramegrabber(acqHandle); } catch { }
+            }
+            acqHandle = null;
+        }
+
+        private static void AcquisitionLoop(string interfaceName, string cameraName, string exposureText,
+            Action<HImage> imageReceived, CancellationToken token)
+        {
+            const int failureThreshold = 3;
+            const int maxReconnectAttempts = 5;
+            int consecutiveFailures = 0;
+            int reconnectAttempts = 0;
+
+            // 当前 HALCON 引用未提供可验证的设备丢失事件，这里以连续抓图失败作为断线判据。
+            while (!token.IsCancellationRequested)
+            {
+                HImage image = null;
+                try
+                {
+                    image = GrabActiveAsync();
+                    consecutiveFailures = 0;
+                    reconnectAttempts = 0;
+
+                    HImage previewImage = image.CopyImage();
+                    if (imageReceived != null)
+                        imageReceived(previewImage);
+                    else
+                        previewImage.Dispose();
+
+                    LatestImageSlot slot = LatestFrameSlot;
+                    if (slot != null)
+                    {
+                        slot.Publish(image);
+                        image = null;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    if (token.IsCancellationRequested) break;
+
+                    consecutiveFailures++;
+                    if (consecutiveFailures < failureThreshold)
+                    {
+                        if (token.WaitHandle.WaitOne(50)) break;
+                        continue;
+                    }
+
+                    NotifyState(CameraState.DeviceFailure, "连续采集失败：" + ex.Message);
+                    if (reconnectAttempts >= maxReconnectAttempts)
+                    {
+                        NotifyState(CameraState.Failed, "相机重连失败，已达到最大尝试次数");
+                        CleanupFailedSession();
+                        break;
+                    }
+
+                    reconnectAttempts++;
+                    int delay = Math.Min(4000, 250 * (1 << Math.Min(reconnectAttempts - 1, 4)));
+                    NotifyState(CameraState.Reconnecting,
+                        "相机重连中（" + reconnectAttempts + "/" + maxReconnectAttempts + "）");
+                    if (token.WaitHandle.WaitOne(delay)) break;
+
+                    if (token.IsCancellationRequested)
+                        break;
+
+                    try
+                    {
+                        ReopenActiveHandle(interfaceName, cameraName, exposureText, token);
+                        consecutiveFailures = 0;
+                        reconnectAttempts = 0;
+                        NotifyState(CameraState.Running, "相机重连成功");
+                    }
+                    catch (OperationCanceledException) when (token.IsCancellationRequested)
+                    {
+                        break;
+                    }
+                    catch (Exception reconnectException)
+                    {
+                        NotifyState(CameraState.DeviceFailure, "相机重连失败：" + reconnectException.Message);
+                    }
+                }
+                finally
+                {
+                    if (image != null) image.Dispose();
+                }
             }
         }
-        #endregion
 
-        #region 后台循环：抓图 → 显示
-        /// <summary>
-        /// 在后台循环抓取图像，并将最新帧排入 UI 线程处理。
-        /// </summary>
-        /// <param name="acqHandle">用于异步抓图的 HALCON 图像采集句柄。</param>
-        /// <param name="window">用于 BeginInvoke 调度和图像显示的窗口控件。</param>
-        /// <param name="imageReceived">接收图像帧的回调，为 null 时直接显示。</param>
-        /// <param name="token">用于停止后台循环的取消令牌。</param>
-        private static void GrabLoop(HTuple acqHandle, HWindowControl window,
-            Action<HImage> imageReceived, CancellationToken token)
+        private static void DetectionLoop(CancellationToken token)
         {
             while (!token.IsCancellationRequested)
             {
-                HImage img = null;
-                try
+                LatestImageSlot slot = LatestFrameSlot;
+                HImage image = slot == null ? null : slot.Take();
+                if (image == null)
                 {
-                    img = GrabAsync(acqHandle);
-                }
-                catch
-                {
-                    if (!token.IsCancellationRequested)
-                        Thread.Sleep(20);
+                    if (token.WaitHandle.WaitOne(20)) break;
                     continue;
                 }
 
-                if (token.IsCancellationRequested)
+                Action<HImage> callback = DetectionCallback;
+                if (callback == null)
                 {
-                    img.Dispose();
-                    break;
-                }
-
-                // UI 尚未处理上一帧时丢弃当前帧，避免连续采集堆积大量图像对象。
-                if (Interlocked.CompareExchange(ref PendingDisplayCount, 1, 0) != 0)
-                {
-                    img.Dispose();
+                    image.Dispose();
                     continue;
                 }
 
-                HImage displayImage = img;
                 try
                 {
-                    window.BeginInvoke(new Action(() =>
-                    {
-                        try
-                        {
-                            if (imageReceived == null)
-                                HalconCameraHelper.DisplayImageFitWindow(window, displayImage);
-                            else
-                                imageReceived(displayImage);
-                        }
-                        finally
-                        {
-                            displayImage.Dispose();
-                            Interlocked.Exchange(ref PendingDisplayCount, 0);
-                        }
-                    }));
+                    callback(image);
                 }
                 catch
                 {
-                    displayImage.Dispose();
-                    Interlocked.Exchange(ref PendingDisplayCount, 0);
+                    // 回调异常由 finally 统一释放当前帧，避免重复 Dispose。
+                }
+                finally
+                {
+                    image.Dispose();
                 }
             }
         }
+
+        private static void ReopenActiveHandle(string interfaceName, string cameraName, string exposureText,
+            CancellationToken token)
+        {
+            lock (CameraHandleSyncRoot)
+            {
+                if (token.IsCancellationRequested)
+                    throw new OperationCanceledException(token);
+
+                CloseActiveHandle();
+                string deviceName = GetCompatibleDeviceName(interfaceName, cameraName);
+                HTuple reopenedHandle;
+                Open(interfaceName, deviceName, out reopenedHandle);
+                try
+                {
+                    if (token.IsCancellationRequested)
+                        throw new OperationCanceledException(token);
+                    if (!ApplyExposureText(reopenedHandle, exposureText, false, out string exposureMessage))
+                        throw new InvalidOperationException(exposureMessage);
+                    HOperatorSet.GrabImageStart(reopenedHandle, -1);
+                    if (token.IsCancellationRequested)
+                        throw new OperationCanceledException(token);
+                    ActiveHandle = reopenedHandle;
+                    reopenedHandle = null;
+                }
+                catch
+                {
+                    try
+                    {
+                        if (IsOpen(reopenedHandle))
+                            HOperatorSet.CloseFramegrabber(reopenedHandle);
+                    }
+                    catch
+                    {
+                    }
+                    throw;
+                }
+            }
+        }
+
+        private static void CleanupFailedSession()
+        {
+            CancellationTokenSource cts;
+            Task detectionTask;
+            LatestImageSlot slot;
+            lock (CameraSyncRoot)
+            {
+                cts = GrabCts;
+                detectionTask = DetectionTask;
+                slot = LatestFrameSlot;
+                GrabCts = null;
+                GrabTask = null;
+                DetectionTask = null;
+                LatestFrameSlot = null;
+                DetectionCallback = null;
+                StateCallback = null;
+            }
+
+            if (cts != null)
+                cts.Cancel();
+            // 当前方法由采集线程调用，不能等待 GrabTask 自身；当前迭代已离开 HALCON 调用。
+            WaitTask(detectionTask);
+            try
+            {
+                if (slot != null)
+                    slot.Dispose();
+            }
+            finally
+            {
+                try
+                {
+                    CloseActiveHandle();
+                }
+                catch
+                {
+                    // 设备已断开时关闭句柄可能失败，但不能阻断其余会话清理。
+                }
+                finally
+                {
+                    if (cts != null)
+                        cts.Dispose();
+                }
+            }
+        }
+
+        private static HImage GrabActiveAsync()
+        {
+            lock (CameraHandleSyncRoot)
+            {
+                if (!IsOpen(ActiveHandle))
+                    throw new InvalidOperationException("相机采集句柄无效。");
+                return GrabAsync(ActiveHandle);
+            }
+        }
+
+        private static string GetCompatibleDeviceName(string interfaceName, string cameraName)
+        {
+            if (string.Equals(interfaceName, "GigEVision2", StringComparison.OrdinalIgnoreCase) &&
+                cameraName.IndexOf("|", StringComparison.Ordinal) < 0 &&
+                cameraName.IndexOf("user_name:", StringComparison.OrdinalIgnoreCase) < 0 &&
+                cameraName.IndexOf("device:", StringComparison.OrdinalIgnoreCase) < 0)
+                return "user_name:" + cameraName;
+            return cameraName;
+        }
+
+        private static void CloseActiveHandle()
+        {
+            lock (CameraHandleSyncRoot)
+            {
+                HTuple handle = ActiveHandle;
+                ActiveHandle = null;
+                if (IsOpen(handle))
+                {
+                    try
+                    {
+                        HOperatorSet.CloseFramegrabber(handle);
+                    }
+                    finally
+                    {
+                        handle = null;
+                    }
+                }
+            }
+        }
+
+        private static void WaitTask(Task task)
+        {
+            if (task == null || task.IsCompleted) return;
+            try
+            {
+                task.Wait();
+            }
+            catch (AggregateException)
+            {
+            }
+        }
+
+        private static void NotifyState(CameraState state, string message)
+        {
+            NotifyState(StateCallback, state, message);
+        }
+
+        private static void NotifyState(Action<CameraState, string> callback, CameraState state, string message)
+        {
+            if (callback == null) return;
+            try
+            {
+                callback(state, message);
+            }
+            catch
+            {
+            }
+        }
+        #endregion
         #endregion
 
         #region 解析设备名
@@ -595,6 +858,7 @@ namespace VisionDemo2026
         /// <returns>相机成功打开且曝光设置成功时返回 true。</returns>
         public static bool SetCameraExposureByName(string interfaceName, string cameraName, string exposureText, ref HTuple acqHandle, out string message)
         {
+            StopGrab(ref acqHandle);
             if (!OpenCameraByName(interfaceName, cameraName, ref acqHandle, out message))
                 return false;
 
